@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Outputs
+*.json
+!examples/sample_output.json
+
+# Audio files (don't commit)
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+demucs_out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

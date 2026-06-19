@@ -1,0 +1,93 @@
+{
+  "_comment": "Output from: python analyze_audio.py song.wav --deep --bands --hpss --tags --lufs --stereo",
+  "file": "song.wav",
+  "analyzed_offset_sec": 0,
+  "analyzed_duration_sec": 30.0,
+  "sample_rate": 22050,
+  "basic": {
+    "tempo_bpm": 152.0,
+    "beats_count": 71,
+    "key": {
+      "note": "G",
+      "mode": "major",
+      "confidence": 0.502
+    },
+    "spectral": {
+      "centroid_hz": 2323.2,
+      "rolloff_hz": 5243.6,
+      "bandwidth_hz": 2606.9,
+      "zero_crossing_rate": 0.1028
+    },
+    "loudness": {
+      "peak_db": -0.52,
+      "rms_db": -12.75,
+      "dynamic_range_db": 12.23
+    }
+  },
+  "bands": {
+    "sub_bass_20_60hz": {"percent": 5.0},
+    "bass_60_250hz": {"percent": 27.0},
+    "low_mid_250_500hz": {"percent": 7.6},
+    "mid_500_2000hz": {"percent": 20.4},
+    "high_mid_2000_4000hz": {"percent": 16.3},
+    "presence_4000_6000hz": {"percent": 12.7},
+    "brilliance_6000_20000hz": {"percent": 10.7}
+  },
+  "hpss": {
+    "harmonic_ratio": 0.752,
+    "percussive_ratio": 0.248,
+    "note": "Ratio of harmonic to percussive content"
+  },
+  "tags": {
+    "top_tags": [
+      {"tag": "Music", "score": 0.6988},
+      {"tag": "Drum kit", "score": 0.2678},
+      {"tag": "Drum", "score": 0.2354},
+      {"tag": "Snare drum", "score": 0.1955},
+      {"tag": "Bass drum", "score": 0.1944},
+      {"tag": "Hi-hat", "score": 0.1528},
+      {"tag": "Cymbal", "score": 0.1397}
+    ],
+    "genres": [
+      {"tag": "Electronic music", "score": 0.0411},
+      {"tag": "Pop music", "score": 0.0385},
+      {"tag": "Funk", "score": 0.0261},
+      {"tag": "Disco", "score": 0.0168},
+      {"tag": "Rock music", "score": 0.0147}
+    ],
+    "instruments": [
+      {"tag": "Drum kit", "score": 0.2678},
+      {"tag": "Guitar", "score": 0.0271}
+    ],
+    "vocals": [
+      {"tag": "Singing", "score": 0.0428},
+      {"tag": "Speech", "score": 0.0321}
+    ],
+    "moods": [
+      {"tag": "Funny music", "score": 0.0322},
+      {"tag": "Exciting music", "score": 0.0206},
+      {"tag": "Cacophony", "score": 0.0202}
+    ],
+    "note": "PANNs Cnn14 (AudioSet 527 tags). Scores are relative, 0-1."
+  },
+  "lufs": {
+    "integrated_lufs": -10.28,
+    "short_term_lufs_min": -16.69,
+    "short_term_lufs_max": -8.93,
+    "short_term_lufs_range": 7.76,
+    "headroom_to_targets_db": {
+      "Spotify": 3.72,
+      "YouTube": 3.72,
+      "Apple Music": 5.72,
+      "Tidal": 3.72,
+      "CD/Streaming Pro": -0.28
+    }
+  },
+  "stereo": {
+    "L_R_correlation": 0.982,
+    "stereo_width_ratio": 0.096,
+    "lr_balance_db": -0.0,
+    "mid_energy_db": -12.15,
+    "side_energy_db": -32.49
+  }
+}
