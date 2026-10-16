@@ -133,7 +133,7 @@ JSON to stdout. Pipe to a file:
 python analyze_audio.py song.wav --all > analysis.json
 ```
 
-See `examples/sample_output.json` for an actual analysis result.
+See `examples/sample_output.json` for an actual analysis result (a 2:56 instrumental game BGM; long arrays trimmed), and `examples/sample_summary_ja.txt` for the same song with `--summary --chords`.
 
 ## Limitations
 
