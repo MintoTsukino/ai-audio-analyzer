@@ -656,6 +656,104 @@ def compare_analysis(a, b, image_path=None):
     return out
 
 
+def mix_doctor(a):
+    """ミックスのお医者さん：経験則で気になるところを挙げる（好みや狙いでわざとやっていることもある。決めるのは耳）"""
+    from scipy.signal import butter, sosfiltfilt
+    import pyloudnorm as pyln
+    findings = []
+
+    def add(level, area, what, evidence, hint):
+        findings.append({'level': level, 'area': area, 'what': what, 'evidence': evidence, 'hint': hint})
+
+    # 1. 音の形：その曲自身の傾き（100Hz〜4kHzの回帰直線）から飛び出しているところ。基準はジャンルではなく「その曲の全体の傾き」
+    from scipy.signal import welch
+    f, P = welch(a.mono_native, fs=a.sr_native, nperseg=8192)
+    centers, energy = [], []
+    for fc in THIRD_OCT_CENTERS:
+        lo, hi = fc / 2 ** (1 / 6), fc * 2 ** (1 / 6)
+        if hi > a.sr_native / 2:
+            break
+        m = (f >= lo) & (f < hi)
+        if m.any():
+            centers.append(fc)
+            energy.append(float(10 * np.log10(P[m].sum() + 1e-20)))   # 帯域のエネルギー（ピンクノイズで平ら）
+    centers, energy = np.array(centers), np.array(energy)
+    fit = (centers >= 100) & (centers <= 4000)   # 高域が急に落ちる曲（mp3の上の切れ・暗い音色）に傾きが引っぱられないよう 4kHz まで
+    slope, icpt = np.polyfit(np.log2(centers[fit]), energy[fit], 1)
+    resid = energy - (slope * np.log2(centers) + icpt)
+
+    def res(lo, hi):
+        m = (centers >= lo) & (centers < hi)
+        return float(resid[m].mean()) if m.any() else 0.0
+
+    r = {name: res(lo, hi) for name, lo, hi in REGIONS}
+    r['空気感'] = res(10000, 15000)   # mp3 は16〜18kHzより上を切ることが多いので、空気感は15kHzまでで見る
+    tilt_note = f'全体の傾き {slope:+.1f}dB/オクターブ（帯域エネルギー・ピンクノイズで0）'
+    if r['こもり'] >= 3:
+        add('気になる', 'こもり（200〜500Hz）', 'こもって聴こえやすい', f"曲の傾きより {r['こもり']:+.1f}dB 多い（{tilt_note}）", 'パッドやギター、ピアノの左手など和音楽器の200〜500Hzを少し削る')
+    if r['鼻づまり感'] >= 3:
+        add('気になる', '鼻づまり感（700〜1500Hz）', '箱っぽい・鼻にかかった感じになりやすい', f"曲の傾きより {r['鼻づまり感']:+.1f}dB 多い", '中域が集まっている楽器を探して少しだけ削る')
+    if r['耳に痛いところ'] >= 3:
+        add('要注意', '耳に痛いところ（2〜5kHz）', '長く聴くと疲れやすい', f"曲の傾きより {r['耳に痛いところ']:+.1f}dB 多い", 'リードやスネア、歪みの2〜5kHzを少し下げる。ゲームのBGMは長く流れるので特に効く')
+    if r['歯擦音・シンバルの刺さり'] >= 3:
+        add('気になる', '刺さり（5〜9kHz）', 'シンバルや歯擦音が刺さりやすい', f"曲の傾きより {r['歯擦音・シンバルの刺さり']:+.1f}dB 多い", 'ハイハット・シンバルの音量か、ディエッサー')
+    if r['空気感'] <= -6:
+        add('参考', '空気感（10〜15kHz）', '上のほうが少なめで、こもって・暗く聴こえることがある', f"曲の傾きより {r['空気感']:+.1f}dB（16kHzより上はmp3で切れることが多いので見ていない）", '狙いでなければ、高域を少し持ち上げる（シェルフ）')
+    if r['超低域（体で感じる）'] >= 4:
+        add('気になる', '超低域（20〜60Hz）', '低音がふくらんで、ほかの音を押しやすい', f"曲の傾きより {r['超低域（体で感じる）']:+.1f}dB 多い", '30Hz以下を切る、キックとサブベースの役割を分ける')
+    if r['低音の芯'] <= -4:
+        add('参考', '低音の芯（60〜150Hz）', '低音の芯が細く、軽く聴こえることがある', f"曲の傾きより {r['低音の芯']:+.1f}dB", 'ベースの80〜120Hzを足す')
+
+    # 2. ピークと音割れ
+    pk = peak_analysis(a)
+    lufs = float(pyln.Meter(a.sr_native).integrated_loudness(a.stereo.T))
+    if pk['clipped_samples'] > 0:
+        add('要注意', '音割れ', '±0.999以上に張り付いたサンプルがある', f"{pk['clipped_samples']}サンプル", '全体を1〜2dB下げるか、リミッターの天井を下げる')
+    if pk['true_peak_dbtp'] > -1.0:
+        add('気になる' if pk['true_peak_dbtp'] <= 0 else '要注意', 'true peak', 'mp3やoggにしたり配信したりすると割れることがある',
+            f"{pk['true_peak_dbtp']}dBTP（目安は -1dBTP 以下）", 'リミッターの天井を -1dBTP にする（true peak対応のリミッターで）')
+
+    # 3. ダイナミクス（潰しすぎ）
+    rms = float(np.sqrt(np.mean(a.mono_native ** 2)))
+    crest = float(db(np.abs(a.mono_native).max()) - db(rms))
+    plr = pk['true_peak_dbtp'] - lufs
+    if crest < 8 or plr < 7:
+        add('気になる', 'ダイナミクス', '音が潰れて、迫力より疲れが勝ちやすい', f"ピーク−平均 {crest:.1f}dB・true peak−LUFS {plr:.1f}dB（どちらも8前後より小さいと強く潰れている目安）", 'リミッターやコンプのかけすぎを戻す')
+
+    # 4. 低音の左右の広がり・モノにしたときの減り
+    if not a.is_mono_source:
+        L, R = a.stereo[0], a.stereo[1]
+        sos = butter(4, 150, 'lowpass', fs=a.sr_native, output='sos')
+        Ll, Rl = sosfiltfilt(sos, L), sosfiltfilt(sos, R)
+        mid_l, side_l = (Ll + Rl) / 2, (Ll - Rl) / 2
+        side_ratio = float(np.sqrt(np.mean(side_l ** 2)) / (np.sqrt(np.mean(mid_l ** 2)) + 1e-12))
+        corr_low = float(np.corrcoef(Ll, Rl)[0, 1])
+        if side_ratio > 0.3 or corr_low < 0.5:
+            add('要注意' if corr_low < 0.2 else '気になる', '低音の広がり（〜150Hz）', '低音が左右に広がっていて、スマホやモノラルで低音が減る・ぼやける',
+                f"150Hz以下の 左右の差/真ん中 = {side_ratio:.2f}・相関 {corr_low:.2f}（低音は相関0.8以上・差0.3未満が目安）", '低音の楽器をモノにする（150Hz以下をモノにする道具を使う）')
+        mono_drop = float(db(np.sqrt(np.mean(((L + R) / 2) ** 2))) - db((np.sqrt(np.mean(L ** 2)) + np.sqrt(np.mean(R ** 2))) / 2))
+        if mono_drop < -3:
+            add('気になる', 'モノラルにしたとき', '左右を混ぜると音が小さく・薄くなる（位相の打ち消し）', f"モノにすると {mono_drop:.1f}dB", '左右で逆相になっている楽器や、広げすぎのエフェクトを探す')
+        bal = float(db(np.sqrt(np.mean(R ** 2))) - db(np.sqrt(np.mean(L ** 2))))
+        if abs(bal) > 1.0:
+            add('参考', '左右のバランス', '左右どちらかに寄っている', f"{'右' if bal > 0 else '左'}が {abs(bal):.1f}dB 大きい", 'パンや片側だけのエフェクトを見直す')
+
+    # 5. DCずれ
+    dc = max(abs(float(ch.mean())) for ch in a.stereo)
+    if dc > 0.01:
+        add('参考', 'DCずれ', '波形の中心が0からずれている', f"{dc:.3f}", 'ハイパス（20Hz前後）を入れる')
+
+    order = {'要注意': 0, '気になる': 1, '参考': 2}
+    findings.sort(key=lambda x: order[x['level']])
+    return {
+        'findings': findings,
+        'tilt_db_per_octave': round(float(slope), 2),
+        'region_residuals_db': {k: round(v, 1) for k, v in r.items()},
+        'integrated_lufs': round(lufs, 2),
+        'note': '経験則の目安。基準はジャンルの平均ではなく「その曲自身の全体の傾き」。狙いや好みでわざとそうしていることもあるので、決めるのは耳。楽器どうしのぶつかり（キックとベースなど）は見ていない',
+    }
+
+
 def _setup_jp_font(plt, matplotlib):
     for fam in ('Yu Gothic', 'Meiryo', 'Noto Sans JP', 'Hiragino Sans', 'MS Gothic'):
         if any(f.name == fam for f in matplotlib.font_manager.fontManager.ttflist):
@@ -836,6 +934,13 @@ def summary_ja(result):
         if g['loop_candidates']:
             c = g['loop_candidates'][0]
             lines.append(f"ループ候補のいちばん：{c['start_sec']}→{c['end_sec']}秒（{c['length_sec']}秒・似かた {c['similarity']}）")
+    if 'doctor' in result:
+        d = result['doctor']
+        lines.append(f"―― ミックスのお医者さん（全体の傾き {d['tilt_db_per_octave']:+}dB/oct）――")
+        if not d['findings']:
+            lines.append('目立つ問題は見つからなかった（見ている項目：帯域の飛び出し・音割れ・true peak・潰しすぎ・低音の広がり・モノ・左右・DC）')
+        for f_ in d['findings']:
+            lines.append(f"[{f_['level']}] {f_['area']}：{f_['what']}（{f_['evidence']}）→ {f_['hint']}")
     if 'compare' in result:
         c = result['compare']
         nm = c['numbers']
@@ -879,11 +984,12 @@ def main():
                    help='音を絵（PNG）にする。パス省略で「<曲名>_ears.png」を曲と同じフォルダに')
     p.add_argument('--image-from', type=float, default=None, help='絵にする範囲の始まり（秒）')
     p.add_argument('--image-to', type=float, default=None, help='絵にする範囲の終わり（秒）')
+    p.add_argument('--doctor', action='store_true', help='ミックスのお医者さん（こもり・耳に痛い・低音の広がり・潰しすぎ・true peak など）')
     p.add_argument('--compare', default=None, help='くらべる曲B（Aはaudio_path）。音量をそろえて音の形・数字の差を出し、<A>_vs_<B>.png を描く')
     args = p.parse_args()
 
     if args.summary:
-        args.structure = args.bands = args.hpss = args.tags = args.lufs = args.stereo = args.game = True
+        args.structure = args.bands = args.hpss = args.tags = args.lufs = args.stereo = args.game = args.doctor = True
 
     duration = None if args.full else args.duration
     a = Audio(args.audio_path, args.offset, duration)
@@ -923,6 +1029,9 @@ def main():
         result['whisper'] = whisper_lyrics(args.audio_path, args.offset, duration, model_size='base', lang=args.lang)
     if args.whisper_large:
         result['whisper'] = whisper_lyrics(args.audio_path, args.offset, duration, model_size='large', lang=args.lang)
+
+    if args.doctor or args.all:
+        result['doctor'] = mix_doctor(a)
 
     if args.compare:
         import os
