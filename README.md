@@ -45,45 +45,63 @@ Whisper downloads its model on first use (~150MB for base, ~3GB for large).
 ## Usage
 
 ```bash
-# Basic analysis (first 30 seconds)
+# Basic analysis (whole file by default)
 python analyze_audio.py song.wav
+
+# Short Japanese summary for an AI to read and talk about
+python analyze_audio.py song.wav --summary
 
 # Specific modes
 python analyze_audio.py song.wav --tags --bands --lufs
 
-# Full analysis (heavy)
+# Everything except Demucs and whisper-large
 python analyze_audio.py song.wav --all
+
+# Game BGM checks (silence, DC offset, loop point candidates on the beat grid)
+python analyze_audio.py song.wav --game
 
 # Analyze a specific section
 python analyze_audio.py song.wav --offset 60 --duration 30
 
-# Whole file
-python analyze_audio.py song.wav --full
-
-# High-precision lyrics (3GB model download on first use)
-python analyze_audio.py song.wav --whisper-large
+# High-precision lyrics (3GB model download on first use). Language is auto-detected unless --lang is given
+python analyze_audio.py song.wav --whisper-large --lang ja
 ```
+
+### What changed (2026-10)
+
+- **Whole file by default.** Previously only the first 30 seconds were analyzed unless `--full` was given. Use `--duration` to limit. `--full` is kept for compatibility.
+- **Bands, spectral features and peaks use the original sample rate (stereo).** Previously everything was resampled to 22.05 kHz mono, so content above ~11 kHz was missing from `brilliance_6000_20000hz`, and the peak was measured on the resampled mono signal.
+- **Sample peak vs. true peak** (4x oversampled), plus a count of clipped samples.
+- **Structure:** the number of sections follows the song length (about one per 20 s), boundaries snap to the nearest beat, and each section reports loudness, percussive ratio, low-end share and brightness. Also reports when percussion enters.
+- **Beat grid fallback:** for pad/organ-heavy music where the beat tracker finds almost no beats, a grid is built from the estimated tempo and aligned to onsets.
+- **PANNs tags cover the whole file** in 10-second windows (overall = max over windows) and include a per-window timeline. Model-loading messages no longer pollute the JSON on stdout.
+- **Demucs** is launched with the current Python interpreter and stem energy is measured over the whole stem. `--all` no longer includes Demucs (too slow); pass `--demucs` explicitly.
+- **Whisper** language is auto-detected (was hard-coded to Japanese).
+- **`--summary`** prints a short Japanese summary instead of JSON. **`--game`** adds game-BGM checks.
 
 ### All flags
 
 | Flag | What it does |
 |---|---|
 | `--deep` | MFCC, Tonnetz, spectral contrast, chroma |
-| `--structure` | Section boundaries, energy curve |
+| `--structure` | Sections (auto count, beat-snapped) with per-section loudness / percussion / low end / brightness, energy curve |
 | `--rhythm` | Onset times, tempo stability |
 | `--bands` | 7-band frequency energy distribution |
 | `--hpss` | Harmonic / percussive ratio |
 | `--pitch` | F0 tracking (monophonic) |
-| `--tags` | PANNs ML tags (genre / instrument / mood) |
+| `--tags` | PANNs ML tags (genre / instrument / mood), whole file in 10 s windows with a timeline |
+| `--game` | Game BGM checks: leading/trailing silence, DC offset, loop point candidates |
+| `--summary` | Short Japanese summary (enables structure, bands, hpss, tags, lufs, stereo, game) |
+| `--lang XX` | Whisper language (default: auto-detect) |
 | `--whisper` | Lyrics (whisper-base) |
 | `--whisper-large` | Lyrics (whisper-large, 3GB model) |
 | `--lufs` | LUFS loudness with platform targets |
 | `--stereo` | Stereo image analysis |
 | `--demucs` | Stem separation (slow) |
-| `--all` | Everything except `--whisper-large` |
+| `--all` | Everything except `--demucs` and `--whisper-large` |
 | `--offset N` | Start offset in seconds (default 0) |
-| `--duration N` | Analysis length in seconds (default 30) |
-| `--full` | Analyze entire file (slow) |
+| `--duration N` | Analysis length in seconds (default: whole file) |
+| `--full` | Analyze entire file (now the default; kept for compatibility) |
 
 ## Output
 
