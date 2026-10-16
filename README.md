@@ -60,6 +60,15 @@ python analyze_audio.py song.wav --all
 # Game BGM checks (silence, DC offset, loop point candidates on the beat grid)
 python analyze_audio.py song.wav --game
 
+# A/B comparison (loudness-matched tonal balance + number differences + overlay image A_vs_B.png)
+python analyze_audio.py mine.wav --compare reference.wav --summary
+
+# Mix doctor: rule-of-thumb findings (mud, harshness, low-end width, over-compression, true peak, mono, balance, DC)
+python analyze_audio.py song.wav --doctor --summary
+
+# Chord progression estimate (major/minor triads, 4/4 assumed, bar-by-bar, most repeated 4/8 bars)
+python analyze_audio.py song.wav --chords --summary
+
 # Render the sound as an image an AI can look at (loudness + clipping, mel spectrogram, harmonic/percussive, sections)
 python analyze_audio.py song.wav --image                         # -> song_ears.png next to the file
 python analyze_audio.py song.wav --image --image-from 100 --image-to 125   # zoom in (beats are drawn when <= 30 s)
@@ -82,6 +91,9 @@ python analyze_audio.py song.wav --whisper-large --lang ja
 - **Demucs** is launched with the current Python interpreter and stem energy is measured over the whole stem. `--all` no longer includes Demucs (too slow); pass `--demucs` explicitly.
 - **Whisper** language is auto-detected (was hard-coded to Japanese).
 - **`--summary`** prints a short Japanese summary instead of JSON. **`--game`** adds game-BGM checks.
+- **`--compare`** matches loudness (250 Hz–4 kHz) before comparing tonal balance, so "louder sounds better" doesn't fool the comparison. Great for reference-track matching.
+- **`--doctor`** flags bands that stick out from the song's own spectral tilt (fit over 100 Hz–4 kHz so dark/mp3-cut tops don't skew it), clipping, true peak above −1 dBTP, over-compression, low-end stereo width below 150 Hz, mono fold-down loss, L/R balance and DC offset. It does not check instrument masking.
+- **`--chords`** uses the harmonic component's beat-synchronous chroma against major/minor templates with Viterbi smoothing, then groups beats into bars. On a synthetic test (Am–F–C–G ×4) it got 16/16 bars; with 7ths (Am7–Fmaj7–C–G7) 15/16. Tempos below 80 BPM are doubled (half-tempo misreads), so genuinely slow songs may be read at double speed.
 - **`--image`** renders the sound as a picture (loudness with clipping marks, mel spectrogram up to the original Nyquist, harmonic vs. percussive energy, section boundaries). A multimodal AI can *look* at it and spot things numbers miss — filter sweeps, risers, where the hi-hats start, breakdowns.
 
 ### All flags
@@ -100,6 +112,9 @@ python analyze_audio.py song.wav --whisper-large --lang ja
 | `--lang XX` | Whisper language (default: auto-detect) |
 | `--image [PATH]` | Render a PNG "ear image" for multimodal AIs (default: `<file>_ears.png`) |
 | `--image-from N` / `--image-to N` | Time range of the image in seconds |
+| `--compare B` | Compare with file B: numbers, loudness-matched 1/3-octave tonal curve, `A_vs_B.png` |
+| `--doctor` | Mix doctor findings (relative to the song's own spectral tilt, not a genre average) |
+| `--chords` | Chord progression estimate (triads only, 4/4 assumed; roughly 60-70% accurate on real music) |
 | `--whisper` | Lyrics (whisper-base) |
 | `--whisper-large` | Lyrics (whisper-large, 3GB model) |
 | `--lufs` | LUFS loudness with platform targets |

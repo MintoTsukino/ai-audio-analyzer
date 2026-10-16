@@ -100,6 +100,14 @@ class Audio:
             tempo, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=self.sr)
             tempo = float(tempo) if np.isscalar(tempo) else float(np.asarray(tempo).ravel()[0])
             beat_times = librosa.frames_to_time(beats, sr=self.sr)
+            self.tempo_doubled = False
+            if 0 < tempo < 80 and len(beat_times) >= 2:
+                # 和音を2拍ごとに弾き直す曲などで、テンポを半分に読むことがある。80未満なら倍にして、拍のあいだに拍を足す
+                tempo *= 2
+                mids = (beat_times[:-1] + beat_times[1:]) / 2
+                beat_times = np.sort(np.concatenate([beat_times, mids, [beat_times[-1] + (beat_times[-1] - beat_times[-2]) / 2]]))
+                beat_times = beat_times[beat_times < self.duration]
+                self.tempo_doubled = True
             expected = self.duration * tempo / 60 if tempo > 0 else 0
             self.beats_from_grid = False
             if tempo > 0 and len(beat_times) < 0.5 * expected:
@@ -174,6 +182,7 @@ def basic_analysis(a):
         'tempo_bpm': round(tempo, 2),
         'beats_count': int(len(beat_times)),
         'beats_from_tempo_grid': bool(getattr(a, 'beats_from_grid', False)),
+        'tempo_doubled_from_half': bool(getattr(a, 'tempo_doubled', False)),
         'key': {'note': key_note, 'mode': key_mode, 'confidence': round(key_conf, 3)},
         'spectral': {
             'centroid_hz': round(spec_centroid, 1),
@@ -754,6 +763,97 @@ def mix_doctor(a):
     }
 
 
+def _chord_templates():
+    names, temps = [], []
+    for root in range(12):
+        for qual, ivs in (('', (0, 4, 7)), ('m', (0, 3, 7))):
+            t = np.zeros(12)
+            for k, iv in enumerate(ivs):
+                t[(root + iv) % 12] = 1.0 if k != 2 else 0.8   # 5度は少し軽く（どのコードにもよく出るため）
+            names.append(NOTES[root] + qual)
+            temps.append(t / np.linalg.norm(t))
+    return names, np.array(temps)
+
+
+def chord_analysis(a, beats_per_bar=4):
+    """コード進行の推定：拍ごとのクロマ（和音成分）を長三和音・短三和音の型とくらべ、ビタビでなめらかにして小節にまとめる"""
+    y_h, _ = a.hpss()
+    hop = 512
+    chroma = librosa.feature.chroma_cqt(y=y_h, sr=a.sr, hop_length=hop, bins_per_octave=36)
+    tempo, beat_times = a.beats()
+    bf = librosa.time_to_frames(beat_times, sr=a.sr, hop_length=hop)
+    bf = bf[bf < chroma.shape[1]]
+    if len(bf) < 4:
+        return {'note': '拍が少なすぎてコードを推定できない'}
+    beat_times = beat_times[:len(bf)]
+    sync = librosa.util.sync(chroma, np.concatenate([bf, [chroma.shape[1]]]), aggregate=np.median)[:, :len(bf)]
+    energy = sync.sum(axis=0)
+    names, T = _chord_templates()
+    C = sync / (np.linalg.norm(sync, axis=0, keepdims=True) + 1e-9)
+    sim = T @ C                                   # (24, 拍)
+    # ビタビ：同じコードにとどまりやすくする
+    n_states, n_beats = len(names), sim.shape[1]
+    emit = sim * 12.0
+    stay, move = np.log(0.80), np.log(0.20 / (n_states - 1))
+    trans = np.full((n_states, n_states), move)
+    np.fill_diagonal(trans, stay)
+    score = emit[:, 0].copy()
+    back = np.zeros((n_states, n_beats), dtype=int)
+    for t in range(1, n_beats):
+        cand = score[:, None] + trans
+        back[:, t] = np.argmax(cand, axis=0)
+        score = cand[back[:, t], np.arange(n_states)] + emit[:, t]
+    path = np.zeros(n_beats, dtype=int)
+    path[-1] = int(np.argmax(score))
+    for t in range(n_beats - 1, 0, -1):
+        path[t - 1] = back[path[t], t]
+    quiet = energy < 0.15 * np.median(energy)
+    beat_chords = ['N' if quiet[i] else names[path[i]] for i in range(n_beats)]
+
+    # 小節の頭：コードが変わる拍がいちばん多くそろう位置を小節の頭にする
+    changes = [i for i in range(1, n_beats) if beat_chords[i] != beat_chords[i - 1]]
+    phase = max(range(beats_per_bar), key=lambda p: sum(1 for c in changes if (c - p) % beats_per_bar == 0))
+    starts = list(range(phase, n_beats, beats_per_bar))
+    if phase > 0:
+        starts = [0] + starts
+    bars = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else n_beats
+        uniq = []
+        for c in beat_chords[s:e]:
+            if not uniq or uniq[-1] != c:
+                uniq.append(c)
+        bars.append({'start_sec': round(float(beat_times[s]), 2), 'chord': '/'.join(uniq)})
+    bar_labels = [b['chord'] for b in bars]
+
+    timeline = []
+    for i, c in enumerate(beat_chords):
+        if not timeline or timeline[-1]['chord'] != c:
+            timeline.append({'start_sec': round(float(beat_times[i]), 2), 'chord': c})
+    for i in range(len(timeline)):
+        timeline[i]['end_sec'] = timeline[i + 1]['start_sec'] if i + 1 < len(timeline) else round(a.duration, 2)
+
+    from collections import Counter
+    def grams_of(n):
+        # 同じコードがずっと続くだけの並びは「進行」ではないので数えない
+        return Counter(tuple(bar_labels[i:i + n]) for i in range(len(bar_labels) - n + 1)
+                       if 'N' not in bar_labels[i:i + n] and len(set(bar_labels[i:i + n])) >= 2)
+    common = [{'bars': list(g), 'count': c} for g, c in grams_of(4).most_common(3) if c >= 2]
+    common8 = [{'bars': list(g), 'count': c} for g, c in grams_of(8).most_common(2) if c >= 2]
+    used = Counter(c for c in beat_chords if c != 'N')
+    conf = float(np.mean([sim[path[i], i] for i in range(n_beats) if not quiet[i]])) if (~quiet).any() else 0.0
+    return {
+        'beats_per_bar_assumed': beats_per_bar,
+        'bars': bars,
+        'timeline': timeline,
+        'most_common_4bars': common,
+        'most_common_8bars': common8,
+        'chords_used': [{'chord': c, 'beats': n} for c, n in used.most_common(8)],
+        'match_mean': round(conf, 3),
+        'note': '推定（長三和音・短三和音のみ。7th・テンション・分数コードは近い三和音になる）。拍子は4拍子と仮定。音だけからの推定なので、だいたい6〜7割の当たり方と思って使う。N＝和音がはっきりしない（静か・ドラムだけ）',
+    }
+
+
 def _setup_jp_font(plt, matplotlib):
     for fam in ('Yu Gothic', 'Meiryo', 'Noto Sans JP', 'Hiragino Sans', 'MS Gothic'):
         if any(f.name == fam for f in matplotlib.font_manager.fontManager.ttflist):
@@ -934,6 +1034,17 @@ def summary_ja(result):
         if g['loop_candidates']:
             c = g['loop_candidates'][0]
             lines.append(f"ループ候補のいちばん：{c['start_sec']}→{c['end_sec']}秒（{c['length_sec']}秒・似かた {c['similarity']}）")
+    if 'chords' in result and 'bars' in result['chords']:
+        ch = result['chords']
+        first = ' | '.join(b['chord'] for b in ch['bars'][:8])
+        lines.append(f"コード（推定・4拍子と仮定）：最初の8小節 {first}")
+        if ch.get('most_common_8bars'):
+            mc = ch['most_common_8bars'][0]
+            lines.append(f"いちばん繰り返される8小節：{' | '.join(mc['bars'])}（{mc['count']}回）")
+        if ch['most_common_4bars']:
+            mc = ch['most_common_4bars'][0]
+            lines.append(f"いちばん繰り返される4小節：{' | '.join(mc['bars'])}（{mc['count']}回）")
+        lines.append('よく出るコード：' + '・'.join(c['chord'] for c in ch['chords_used'][:6]))
     if 'doctor' in result:
         d = result['doctor']
         lines.append(f"―― ミックスのお医者さん（全体の傾き {d['tilt_db_per_octave']:+}dB/oct）――")
@@ -984,6 +1095,7 @@ def main():
                    help='音を絵（PNG）にする。パス省略で「<曲名>_ears.png」を曲と同じフォルダに')
     p.add_argument('--image-from', type=float, default=None, help='絵にする範囲の始まり（秒）')
     p.add_argument('--image-to', type=float, default=None, help='絵にする範囲の終わり（秒）')
+    p.add_argument('--chords', action='store_true', help='コード進行の推定（小節ごと・いちばん繰り返される4小節）')
     p.add_argument('--doctor', action='store_true', help='ミックスのお医者さん（こもり・耳に痛い・低音の広がり・潰しすぎ・true peak など）')
     p.add_argument('--compare', default=None, help='くらべる曲B（Aはaudio_path）。音量をそろえて音の形・数字の差を出し、<A>_vs_<B>.png を描く')
     args = p.parse_args()
@@ -1032,6 +1144,8 @@ def main():
 
     if args.doctor or args.all:
         result['doctor'] = mix_doctor(a)
+    if args.chords or args.all:
+        result['chords'] = chord_analysis(a)
 
     if args.compare:
         import os
