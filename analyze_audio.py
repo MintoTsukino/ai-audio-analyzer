@@ -559,6 +559,106 @@ def game_checks(a):
     }
 
 
+def render_image(a, out_path, structure=None, t_from=None, t_to=None):
+    """音を絵にする（AIが画像として「見る」ため）：音量・スペクトログラム・和音/打楽器・区間を時間で並べる"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import librosa.display
+    for fam in ('Yu Gothic', 'Meiryo', 'Noto Sans JP', 'Hiragino Sans', 'MS Gothic'):
+        if any(f.name == fam for f in matplotlib.font_manager.fontManager.ttflist):
+            plt.rcParams['font.family'] = fam
+            break
+
+    t0 = 0.0 if t_from is None else max(0.0, t_from)
+    t1 = a.duration if t_to is None else min(a.duration, t_to)
+    if t1 - t0 < 0.5:
+        raise ValueError('絵にする範囲が短すぎる')
+    srn = a.sr_native
+    x = a.mono_native[int(t0 * srn):int(t1 * srn)]
+    st = a.stereo[:, int(t0 * srn):int(t1 * srn)]
+
+    fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True,
+                             gridspec_kw={'height_ratios': [1.1, 3.2, 1.1]})
+    tempo, beat_times = a.beats()
+    title = (f"{a.path.replace(chr(92), '/').split('/')[-1]}　{t0:.1f}〜{t1:.1f}秒"
+             f"　テンポ約{tempo:.0f}BPM")
+    fig.suptitle(title, fontsize=14)
+
+    # 1. 音量（約50msごとのRMS）と音割れ
+    hop = max(1, int(srn * 0.05))
+    n = len(x) // hop
+    rms = np.sqrt(np.mean(x[:n * hop].reshape(n, hop) ** 2, axis=1))
+    tt = t0 + (np.arange(n) + 0.5) * hop / srn
+    ax = axes[0]
+    ax.plot(tt, db(rms), color='#2b6cb0', lw=1)
+    ax.set_ylabel('音量 dB')
+    ax.set_ylim(max(-60, float(db(rms).min()) - 3), 3)
+    clip_idx = np.nonzero(np.abs(st).max(axis=0) >= 0.999)[0]
+    if len(clip_idx):
+        ct = t0 + clip_idx / srn
+        ax.plot(ct, np.full_like(ct, 1.5), '|', color='#e53e3e', ms=10)
+        ax.text(0.995, 0.92, f'赤＝音割れ {len(clip_idx)}サンプル', transform=ax.transAxes,
+                ha='right', va='top', color='#e53e3e', fontsize=10)
+    ax.grid(alpha=0.3)
+
+    # 2. メルスペクトログラム（元のサンプルレート）
+    ax = axes[1]
+    S = librosa.feature.melspectrogram(y=x, sr=srn, n_fft=4096, hop_length=1024, n_mels=160, fmin=20, fmax=srn / 2)
+    S_db = librosa.power_to_db(S, ref=np.max)
+    librosa.display.specshow(S_db, sr=srn, hop_length=1024, x_axis='time', y_axis='mel', fmin=20, fmax=srn / 2,
+                             ax=ax, cmap='magma', x_coords=t0 + librosa.frames_to_time(np.arange(S_db.shape[1]), sr=srn, hop_length=1024))
+    ax.set_yticks([60, 250, 500, 1000, 2000, 4000, 8000, 16000])
+    ax.set_yticklabels(['60', '250', '500', '1k', '2k', '4k', '8k', '16k'])
+    ax.set_ylabel('高さ Hz（明るいほど強い）')
+    ax.set_xlabel('')
+
+    # 3. 和音と打楽器（HPSS・22kHz）
+    ax = axes[2]
+    y_h, y_p = a.hpss()
+    s0, s1 = int(t0 * a.sr), int(t1 * a.sr)
+    hop2 = 1024
+    for sig, name, col in ((y_h[s0:s1], '和音', '#38a169'), (y_p[s0:s1], '打楽器', '#dd6b20')):
+        r = librosa.feature.rms(y=sig, hop_length=hop2).flatten()
+        tr = t0 + librosa.frames_to_time(np.arange(len(r)), sr=a.sr, hop_length=hop2)
+        ax.plot(tr, db(r), color=col, lw=1, label=name)
+    ax.set_ylabel('dB')
+    ax.set_ylim(-70, 0)
+    ax.legend(loc='upper left', fontsize=10, ncol=2)
+    ax.grid(alpha=0.3)
+    ax.set_xlabel('時間（分:秒）')
+
+    # 区間の切れ目と、狭い範囲なら拍も
+    if structure:
+        for sec in structure['sections']:
+            s = sec['start_sec']
+            if t0 <= s <= t1:
+                for axx in axes:
+                    axx.axvline(s, color='#00e5ff', lw=1.2, alpha=0.9)
+                mid = (max(s, t0) + min(sec['end_sec'], t1)) / 2
+                visible = min(sec['end_sec'], t1) - max(s, t0)
+                if t0 <= mid <= t1 and visible >= 0.07 * (t1 - t0):   # 狭い区間は名前を出さない（重なって読めないため）
+                    axes[0].text(mid, 0.02, sec['label'], transform=axes[0].get_xaxis_transform(),
+                                 ha='center', va='bottom', fontsize=9, color='#1a202c',
+                                 bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='none', alpha=0.7))
+    if t1 - t0 <= 30:
+        for b in beat_times:
+            if t0 <= b <= t1:
+                axes[2].axvline(b, color='#a0aec0', lw=0.6, alpha=0.6)
+    axes[2].set_xlim(t0, t1)
+    # 横軸は「分:秒」で（specshow の時間表示は範囲をずらすと 1e+02 のように崩れるため、自分で書く）
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    span = t1 - t0
+    fmt = (lambda v, _: f"{int(v // 60)}:{v % 60:04.1f}") if span <= 60 else (lambda v, _: f"{int(v // 60)}:{int(round(v % 60)) % 60:02d}")
+    for axx in axes:
+        axx.xaxis.set_major_locator(MaxNLocator(nbins=12))
+        axx.xaxis.set_major_formatter(FuncFormatter(fmt))
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(out_path, dpi=110)
+    plt.close(fig)
+    return out_path
+
+
 def summary_ja(result):
     """ニコイが読んで、そのまま話せる日本語の短いまとめ"""
     lines = []
@@ -623,6 +723,10 @@ def main():
     p.add_argument('--demucs', action='store_true', help='楽器分離(vocals/drums/bass/other)')
     p.add_argument('--all', action='store_true', help='全部（Whisper large と Demucs 以外）')
     p.add_argument('--summary', action='store_true', help='日本語の短いまとめだけ出す（--structure --bands --hpss --tags --lufs --stereo --game をまとめて有効にする）')
+    p.add_argument('--image', nargs='?', const='auto', default=None,
+                   help='音を絵（PNG）にする。パス省略で「<曲名>_ears.png」を曲と同じフォルダに')
+    p.add_argument('--image-from', type=float, default=None, help='絵にする範囲の始まり（秒）')
+    p.add_argument('--image-to', type=float, default=None, help='絵にする範囲の終わり（秒）')
     args = p.parse_args()
 
     if args.summary:
@@ -667,8 +771,22 @@ def main():
     if args.whisper_large:
         result['whisper'] = whisper_lyrics(args.audio_path, args.offset, duration, model_size='large', lang=args.lang)
 
+    if args.image:
+        import os
+        if args.image == 'auto':
+            base = os.path.splitext(args.audio_path)[0]
+            rng = '' if args.image_from is None and args.image_to is None else f"_{args.image_from or 0:g}-{args.image_to if args.image_to is not None else round(a.duration):g}s"
+            img_path = f'{base}_ears{rng}.png'
+        else:
+            img_path = args.image
+        st = result.get('structure') or structure_analysis(a)
+        result['image'] = render_image(a, img_path, st, args.image_from, args.image_to)
+
     if args.summary:
-        print(summary_ja(result))
+        text = summary_ja(result)
+        if 'image' in result:
+            text += f"\n絵：{result['image']}"
+        print(text)
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False, cls=NumpyJSONEncoder))
 

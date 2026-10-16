@@ -60,6 +60,10 @@ python analyze_audio.py song.wav --all
 # Game BGM checks (silence, DC offset, loop point candidates on the beat grid)
 python analyze_audio.py song.wav --game
 
+# Render the sound as an image an AI can look at (loudness + clipping, mel spectrogram, harmonic/percussive, sections)
+python analyze_audio.py song.wav --image                         # -> song_ears.png next to the file
+python analyze_audio.py song.wav --image --image-from 100 --image-to 125   # zoom in (beats are drawn when <= 30 s)
+
 # Analyze a specific section
 python analyze_audio.py song.wav --offset 60 --duration 30
 
@@ -78,6 +82,7 @@ python analyze_audio.py song.wav --whisper-large --lang ja
 - **Demucs** is launched with the current Python interpreter and stem energy is measured over the whole stem. `--all` no longer includes Demucs (too slow); pass `--demucs` explicitly.
 - **Whisper** language is auto-detected (was hard-coded to Japanese).
 - **`--summary`** prints a short Japanese summary instead of JSON. **`--game`** adds game-BGM checks.
+- **`--image`** renders the sound as a picture (loudness with clipping marks, mel spectrogram up to the original Nyquist, harmonic vs. percussive energy, section boundaries). A multimodal AI can *look* at it and spot things numbers miss — filter sweeps, risers, where the hi-hats start, breakdowns.
 
 ### All flags
 
@@ -93,6 +98,8 @@ python analyze_audio.py song.wav --whisper-large --lang ja
 | `--game` | Game BGM checks: leading/trailing silence, DC offset, loop point candidates |
 | `--summary` | Short Japanese summary (enables structure, bands, hpss, tags, lufs, stereo, game) |
 | `--lang XX` | Whisper language (default: auto-detect) |
+| `--image [PATH]` | Render a PNG "ear image" for multimodal AIs (default: `<file>_ears.png`) |
+| `--image-from N` / `--image-to N` | Time range of the image in seconds |
 | `--whisper` | Lyrics (whisper-base) |
 | `--whisper-large` | Lyrics (whisper-large, 3GB model) |
 | `--lufs` | LUFS loudness with platform targets |
