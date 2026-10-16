@@ -559,6 +559,144 @@ def game_checks(a):
     }
 
 
+THIRD_OCT_CENTERS = [25 * 2 ** (k / 3) for k in range(0, 30)]   # 25Hz〜約16kHz（1/3オクターブ）
+REGIONS = [  # 話すときの名前（帯域の呼び名は目安）
+    ('超低域（体で感じる）', 20, 60),
+    ('低音の芯', 60, 150),
+    ('こもり', 200, 500),
+    ('鼻づまり感', 700, 1500),
+    ('耳に痛いところ', 2000, 5000),
+    ('歯擦音・シンバルの刺さり', 5000, 9000),
+    ('空気感', 10000, 20000),
+]
+
+
+def ltas_third_octave(a):
+    """曲全体の平均的な音の形（1/3オクターブごとのdB）"""
+    from scipy.signal import welch
+    f, P = welch(a.mono_native, fs=a.sr_native, nperseg=8192)
+    nyq = a.sr_native / 2
+    centers, vals = [], []
+    for fc in THIRD_OCT_CENTERS + [20000]:
+        lo, hi = fc / 2 ** (1 / 6), fc * 2 ** (1 / 6)
+        if hi > nyq:
+            break
+        m = (f >= lo) & (f < hi)
+        if m.any():
+            centers.append(round(fc, 1))
+            vals.append(float(10 * np.log10(P[m].mean() + 1e-20)))
+    return np.array(centers), np.array(vals)
+
+
+def region_level(centers, vals, lo, hi):
+    m = (centers >= lo) & (centers < hi)
+    return float(10 * np.log10(np.mean(10 ** (vals[m] / 10)))) if m.any() else None
+
+
+def quick_metrics(a):
+    """くらべる用の数字（重い分析はしない）"""
+    import pyloudnorm as pyln
+    b = basic_analysis(a)
+    lufs = float(pyln.Meter(a.sr_native).integrated_loudness(a.stereo.T))
+    y_h, y_p = a.hpss()
+    ph, pp = float(np.sum(y_h ** 2)), float(np.sum(y_p ** 2))
+    st = stereo_analysis(a)
+    rms = float(np.sqrt(np.mean(a.mono_native ** 2)))
+    return {
+        'duration_sec': round(a.duration, 2),
+        'tempo_bpm': b['tempo_bpm'],
+        'key': f"{b['key']['note']} {b['key']['mode']}",
+        'integrated_lufs': round(lufs, 2),
+        'true_peak_dbtp': b['loudness']['true_peak_dbtp'],
+        'clipped_samples': b['loudness']['clipped_samples'],
+        'crest_factor_db': round(float(db(np.abs(a.mono_native).max()) - db(rms)), 2),
+        'percussive_ratio': round(pp / (ph + pp + 1e-12), 3),
+        'brightness_centroid_hz': b['spectral']['centroid_hz'],
+        'stereo_correlation': st.get('L_R_correlation'),
+        'stereo_width': st.get('stereo_width_ratio'),
+    }
+
+
+def compare_analysis(a, b, image_path=None):
+    """A と B をくらべる。音の形は「音の大きさ（LUFS）をそろえてから」くらべる"""
+    ma, mb = quick_metrics(a), quick_metrics(b)
+    ca, va = ltas_third_octave(a)
+    cb, vb = ltas_third_octave(b)
+    n = min(len(ca), len(cb))
+    ca, va, vb = ca[:n], va[:n], vb[:n]
+    # 音の大きさをそろえる：1kHz付近（250Hz〜4kHz）の平均で合わせる（LUFSの差でも近いが、帯域の形をくらべやすい）
+    mid = (ca >= 250) & (ca <= 4000)
+    offset = float(np.mean(va[mid]) - np.mean(vb[mid]))
+    vb_m = vb + offset
+    diff = vb_m - va   # 正＝Bのほうが多い
+    regions = []
+    for name, lo, hi in REGIONS:
+        la, lb = region_level(ca, va, lo, hi), region_level(ca, vb_m, lo, hi)
+        if la is None or lb is None:
+            continue
+        d = round(lb - la, 1)
+        regions.append({'name': name, 'range_hz': f'{lo}-{hi}', 'b_minus_a_db': d})
+    numbers = {}
+    for k in ma:
+        va_, vb_ = ma[k], mb[k]
+        entry = {'a': va_, 'b': vb_}
+        if isinstance(va_, (int, float)) and isinstance(vb_, (int, float)) and va_ is not None and vb_ is not None:
+            entry['b_minus_a'] = round(vb_ - va_, 3)
+        numbers[k] = entry
+    out = {
+        'a': a.path, 'b': b.path,
+        'numbers': numbers,
+        'tonal_balance_regions': regions,
+        'tonal_curve': {'centers_hz': ca.tolist(), 'a_db': np.round(va, 1).tolist(), 'b_db_level_matched': np.round(vb_m, 1).tolist(),
+                        'b_minus_a_db': np.round(diff, 1).tolist()},
+        'note': '音の形は 250Hz〜4kHz の平均で音量をそろえてからくらべた（大きいほうが良く聴こえる錯覚をのぞくため）。正＝Bのほうが多い。±2dB以上が目安で耳でわかる差',
+    }
+    if image_path:
+        out['image'] = render_compare_image(a, b, ca, va, vb_m, diff, image_path)
+    return out
+
+
+def _setup_jp_font(plt, matplotlib):
+    for fam in ('Yu Gothic', 'Meiryo', 'Noto Sans JP', 'Hiragino Sans', 'MS Gothic'):
+        if any(f.name == fam for f in matplotlib.font_manager.fontManager.ttflist):
+            plt.rcParams['font.family'] = fam
+            return
+
+
+def render_compare_image(a, b, centers, va, vb_m, diff, out_path):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    _setup_jp_font(plt, matplotlib)
+    name = lambda p: p.replace(chr(92), '/').split('/')[-1]
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True, gridspec_kw={'height_ratios': [2, 1.2]})
+    fig.suptitle(f"A：{name(a.path)}　／　B：{name(b.path)}（音量をそろえて比較）", fontsize=13)
+    for (nm, lo, hi), col in zip(REGIONS, ['#edf2f7', '#e6fffa', '#fefcbf', '#fff5f5', '#fed7d7', '#e9d8fd', '#ebf8ff']):
+        for ax in (ax1, ax2):
+            ax.axvspan(lo, hi, color=col, alpha=0.6, lw=0)
+        ax1.text(np.sqrt(lo * hi), 1.0, nm, transform=ax1.get_xaxis_transform(), ha='center', va='bottom', fontsize=8, color='#4a5568')
+    ax1.semilogx(centers, va, '-o', color='#2b6cb0', ms=3, lw=1.6, label='A')
+    ax1.semilogx(centers, vb_m, '-o', color='#dd6b20', ms=3, lw=1.6, label='B（音量そろえ）')
+    ax1.set_ylabel('平均の強さ dB')
+    ax1.legend(loc='lower left')
+    ax1.grid(alpha=0.3, which='both')
+    ax2.semilogx(centers, diff, '-o', color='#2d3748', ms=3, lw=1.4)
+    ax2.axhline(0, color='#718096', lw=1)
+    for lim in (2, -2):
+        ax2.axhline(lim, color='#e53e3e', lw=0.8, ls='--')
+    ax2.set_ylabel('B − A（dB）\n正＝Bが多い')
+    ax2.set_xlabel('周波数 Hz')
+    ax2.grid(alpha=0.3, which='both')
+    ticks = [30, 60, 100, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    ax2.set_xticks(ticks)
+    ax2.set_xticklabels(['30', '60', '100', '250', '500', '1k', '2k', '4k', '8k', '16k'])
+    ax2.set_xlim(20, 20000)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(out_path, dpi=110)
+    plt.close(fig)
+    return out_path
+
+
 def render_image(a, out_path, structure=None, t_from=None, t_to=None):
     """音を絵にする（AIが画像として「見る」ため）：音量・スペクトログラム・和音/打楽器・区間を時間で並べる"""
     import matplotlib
@@ -698,6 +836,20 @@ def summary_ja(result):
         if g['loop_candidates']:
             c = g['loop_candidates'][0]
             lines.append(f"ループ候補のいちばん：{c['start_sec']}→{c['end_sec']}秒（{c['length_sec']}秒・似かた {c['similarity']}）")
+    if 'compare' in result:
+        c = result['compare']
+        nm = c['numbers']
+        lines.append('―― AとBの比較（B−A）――')
+        lines.append(f"音の大きさ {nm['integrated_lufs']['a']} → {nm['integrated_lufs']['b']} LUFS（{nm['integrated_lufs']['b_minus_a']:+}）・true peak {nm['true_peak_dbtp']['a']} → {nm['true_peak_dbtp']['b']}・音割れ {nm['clipped_samples']['a']} → {nm['clipped_samples']['b']}")
+        lines.append(f"テンポ {nm['tempo_bpm']['a']} → {nm['tempo_bpm']['b']}・キー {nm['key']['a']} → {nm['key']['b']}・打楽器 {nm['percussive_ratio']['a']} → {nm['percussive_ratio']['b']}・明るさ {nm['brightness_centroid_hz']['a']} → {nm['brightness_centroid_hz']['b']}Hz")
+        lines.append(f"ダイナミクス（ピーク−平均） {nm['crest_factor_db']['a']} → {nm['crest_factor_db']['b']}dB・ステレオの広がり {nm['stereo_width']['a']} → {nm['stereo_width']['b']}")
+        big = [r for r in c['tonal_balance_regions'] if abs(r['b_minus_a_db']) >= 2]
+        if big:
+            lines.append('音の形（音量をそろえて）：' + '・'.join(f"{r['name']}（{r['range_hz']}Hz）が{'Bのほうが' if r['b_minus_a_db'] > 0 else 'Aのほうが'}{abs(r['b_minus_a_db'])}dB多い" for r in big))
+        else:
+            lines.append('音の形（音量をそろえて）：どの帯域も差は2dB未満。だいたい同じバランス')
+        if 'image' in c:
+            lines.append(f"比較の絵：{c['image']}")
     return '\n'.join(lines)
 
 
@@ -727,6 +879,7 @@ def main():
                    help='音を絵（PNG）にする。パス省略で「<曲名>_ears.png」を曲と同じフォルダに')
     p.add_argument('--image-from', type=float, default=None, help='絵にする範囲の始まり（秒）')
     p.add_argument('--image-to', type=float, default=None, help='絵にする範囲の終わり（秒）')
+    p.add_argument('--compare', default=None, help='くらべる曲B（Aはaudio_path）。音量をそろえて音の形・数字の差を出し、<A>_vs_<B>.png を描く')
     args = p.parse_args()
 
     if args.summary:
@@ -770,6 +923,14 @@ def main():
         result['whisper'] = whisper_lyrics(args.audio_path, args.offset, duration, model_size='base', lang=args.lang)
     if args.whisper_large:
         result['whisper'] = whisper_lyrics(args.audio_path, args.offset, duration, model_size='large', lang=args.lang)
+
+    if args.compare:
+        import os
+        b = Audio(args.compare, 0, None)
+        sa = os.path.splitext(os.path.basename(args.audio_path))[0]
+        sb = os.path.splitext(os.path.basename(args.compare))[0]
+        cmp_img = os.path.join(os.path.dirname(args.audio_path) or '.', f'{sa}_vs_{sb}.png')
+        result['compare'] = compare_analysis(a, b, cmp_img)
 
     if args.image:
         import os
